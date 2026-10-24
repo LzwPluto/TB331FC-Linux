@@ -1,0 +1,11 @@
+--- a/drivers/input/touchscreen/nt36523.h
++++ b/drivers/input/touchscreen/nt36523.h
+@@ -199,7 +199,7 @@
+ #define SPI_READ_MASK(a)	(a & 0x7F)
+ 
+ #define DUMMY_BYTES (1)
+-#define NVT_TRANSFER_LEN	(63*1024)
++#define NVT_TRANSFER_LEN	(4*1024)
+ #define NVT_READ_LEN		(2*1024)
+ 
+ typedef enum {

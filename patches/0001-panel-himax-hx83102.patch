@@ -1,0 +1,196 @@
+--- a/drivers/gpu/drm/panel/panel-himax-hx83102.c
++++ b/drivers/gpu/drm/panel/panel-himax-hx83102.c
+@@ -20,6 +20,10 @@
+ #include <drm/drm_panel.h>
+ 
+ #include <video/mipi_display.h>
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++
++#include "p255_inx_init.h"
+ 
+ /* Manufacturer specific DSI commands */
+ #define HX83102_SETPOWER	0xb1
+@@ -64,6 +68,7 @@
+ 	struct regulator *avdd;
+ 	struct gpio_desc *enable_gpio;
+ 	struct backlight_device *backlight;
++	struct drm_dsc_config dsc;
+ };
+ 
+ struct hx83102_panel_desc {
+@@ -79,6 +84,7 @@
+ 	} size;
+ 
+ 	bool has_dcs_backlight;
++	bool has_dsc;
+ 
+ 	int (*init)(struct hx83102 *ctx);
+ };
+@@ -1195,6 +1201,27 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
++	if (desc->has_dsc) {
++		/*
++		 * Vendor DT: qcom,compression-mode = "dsc", 8 bits per pixel,
++		 * 8 bits per component, slice 600x20, slice-per-pkt 2, DSC 1.1.
++		 */
++		ctx->dsc.dsc_version_major = 1;
++		ctx->dsc.dsc_version_minor = 1;
++		ctx->dsc.bits_per_component = 8;
++		ctx->dsc.bits_per_pixel = 8 << 4;
++		ctx->dsc.line_buf_depth = 9;
++		ctx->dsc.convert_rgb = true;
++		ctx->dsc.slice_width = 600;
++		ctx->dsc.slice_height = 20;
++		ctx->dsc.slice_count = 2;
++		ctx->dsc.block_pred_enable = true;
++		dsi->dsc = &ctx->dsc;
++		dev_info(&dsi->dev, "DSC enabled: %ux%u slices, %u bpp\n",
++			 ctx->dsc.slice_width, ctx->dsc.slice_height,
++			 ctx->dsc.bits_per_pixel >> 4);
++	}
++
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+ 	ret = mipi_dsi_attach(dsi);
+@@ -1217,6 +1244,128 @@
+ 		drm_panel_remove(&ctx->base);
+ }
+ 
++
++/*
++ * Lenovo p255_inx -- INX glass, 1200x1920, 90 Hz, Himax HX83102 TDDI.
++ *
++ * The vendor device tree stores the init sequence as a raw Qualcomm DSI
++ * command buffer:
++ *     [dtype][last][vc][ack][wait_ms][len_hi][len_lo][payload ...]
++ * with dtype 0x39 = generic long write, 0x15 = DCS write + 1 param,
++ * 0x05 = DCS write without parameters.  Replaying it verbatim keeps all
++ * 309 register writes intact instead of risking translation mistakes.
++ */
++/*
++ * Replay part of the vendor command buffer.
++ * *pos is updated to the offset we stopped at.  When stop_at_sleep_in is set we
++ * stop right before the DCS 0x11 (sleep out) packet so the caller can insert the
++ * DSC PPS, which must be programmed before the panel leaves sleep.
++ */
++static int p255_inx_replay_range(struct hx83102 *ctx, const u8 *buf, size_t n,
++				 size_t *pos, bool stop_at_sleep_in)
++{
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	size_t i = *pos;
++
++	while (i + 7 <= n) {
++		u8 dtype = buf[i];
++		u8 wait = buf[i + 4];
++		u16 len = (buf[i + 5] << 8) | buf[i + 6];
++		const u8 *p = &buf[i + 7];
++		int ret = 0;
++
++		if (i + 7 + len > n)
++			break;
++
++		if (stop_at_sleep_in && len >= 1 && p[0] == 0x11 &&
++		    (dtype == 0x05 || dtype == 0x15)) {
++			*pos = i;
++			return 0;
++		}
++
++		switch (dtype) {
++		case 0x39:
++			ret = mipi_dsi_generic_write(dsi, p, len);
++			break;
++		case 0x15:
++			ret = mipi_dsi_dcs_write(dsi, p[0],
++						 len > 1 ? &p[1] : NULL, len - 1);
++			break;
++		case 0x05:
++			ret = mipi_dsi_dcs_write(dsi, p[0], NULL, 0);
++			break;
++		default:
++			break;
++		}
++		if (ret < 0) {
++			dev_err(ctx->base.dev, "p255_inx cmd failed at %zu: %d\n", i, ret);
++			return ret;
++		}
++		if (wait)
++			msleep(wait);
++		i += 7 + len;
++	}
++
++	*pos = i;
++	return 0;
++}
++
++static int lenovo_p255_inx_init(struct hx83102 *ctx)
++{
++	struct drm_dsc_picture_parameter_set pps;
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	size_t pos = 0;
++	int ret;
++
++	if (ctx->desc->has_dsc) {
++		/* register init, stopping before sleep-out */
++		ret = p255_inx_replay_range(ctx, p255_inx_on_seq,
++					    sizeof(p255_inx_on_seq), &pos, true);
++		if (ret)
++			return ret;
++
++		/* tell the panel decoder our compression parameters */
++		drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
++		mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
++		mipi_dsi_compression_mode_ext_multi(&dsi_ctx, true,
++						    MIPI_DSI_COMPRESSION_DSC, 0);
++		if (dsi_ctx.accum_err) {
++			dev_err(ctx->base.dev, "p255_inx: PPS/compression failed: %d\n",
++				dsi_ctx.accum_err);
++			return dsi_ctx.accum_err;
++		}
++	}
++
++	/* sleep out + display on (+ anything after) */
++	return p255_inx_replay_range(ctx, p255_inx_on_seq,
++				     sizeof(p255_inx_on_seq), &pos, false);
++}
++
++static const struct drm_display_mode lenovo_p255_inx_mode = {
++	/* 1396 x 2226 x 90 Hz */
++	.clock = 186473,
++	.hdisplay = 1200,
++	.hsync_start = 1296,
++	.hsync_end = 1300,
++	.htotal = 1396,
++	.vdisplay = 1920,
++	.vsync_start = 1976,
++	.vsync_end = 1978,
++	.vtotal = 2226,
++	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++};
++
++static const struct hx83102_panel_desc lenovo_p255_inx_desc = {
++	.modes = &lenovo_p255_inx_mode,
++	.size = {
++		.width_mm = 147,
++		.height_mm = 235,
++	},
++	.has_dcs_backlight = true,
++	.has_dsc = true,
++	.init = lenovo_p255_inx_init,
++};
++
+ static const struct of_device_id hx83102_of_match[] = {
+ 	{ .compatible = "boe,hx83102p-2k",
+ 	  .data = &boe_hx83102p_2k_desc
+@@ -1239,6 +1388,9 @@
+ 	{ .compatible = "starry,himax83102-j02",
+ 	  .data = &starry_desc
+ 	},
++	{ .compatible = "lenovo,p255-inx",
++	  .data = &lenovo_p255_inx_desc
++	},
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, hx83102_of_match);

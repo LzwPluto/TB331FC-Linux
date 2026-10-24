@@ -1,0 +1,22 @@
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -849,7 +849,8 @@
+ 	slice_per_intf = dsc->slice_count;
+ 
+ 	total_bytes_per_intf = dsc->slice_chunk_size * slice_per_intf;
+-	bytes_per_pkt = dsc->slice_chunk_size; /* * slice_per_pkt; */
++	/* p255_inx spp2 (corrected): 2 slices per packet */
++	bytes_per_pkt = dsc->slice_chunk_size * 2;
+ 
+ 	eol_byte_num = total_bytes_per_intf % 3;
+ 
+@@ -859,7 +860,8 @@
+ 	 * Since the current driver only supports slice_per_pkt = 1,
+ 	 * pkt_per_line will be equal to slice per intf for now.
+ 	 */
+-	pkt_per_line = slice_per_intf;
++	/* p255_inx spp2 (corrected): slice_per_pkt = 2 -> 1 pkt/line */
++	pkt_per_line = slice_per_intf / 2;
+ 
+ 	if (is_cmd_mode) /* packet data type */
+ 		reg = DSI_COMMAND_COMPRESSION_MODE_CTRL_STREAM0_DATATYPE(MIPI_DSI_DCS_LONG_WRITE);

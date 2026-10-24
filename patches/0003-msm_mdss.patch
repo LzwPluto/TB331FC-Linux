@@ -1,0 +1,29 @@
+--- a/drivers/gpu/drm/msm/msm_mdss.c
++++ b/drivers/gpu/drm/msm/msm_mdss.c
+@@ -675,6 +675,17 @@
+ 	.reg_bus_bw = 76800,
+ };
+ 
++/*
++ * sm6225 (TB331FC): UBWC intentionally disabled.  The inherited sm6115 UBWC
++ * parameters (enc 1.0 / dec 2.0, swizzle 7) do not match this part and scanout
++ * of DRM_FORMAT_MOD_QCOM_COMPRESSED buffers decodes to a blue/green grid.
++ * Linear buffers work correctly and 1200x1920@60 only needs ~553 MB/s.
++ */
++static const struct msm_mdss_data sm6225_data = {
++	.highest_bank_bit = 0x1,
++	.reg_bus_bw = 76800,
++};
++
+ static const struct msm_mdss_data sm6125_data = {
+ 	.ubwc_enc_version = UBWC_1_0,
+ 	.ubwc_dec_version = UBWC_3_0,
+@@ -747,7 +758,7 @@
+ 	{ .compatible = "qcom,sm6115-mdss", .data = &sm6115_data },
+ 	{ .compatible = "qcom,sm6125-mdss", .data = &sm6125_data },
+ 	{ .compatible = "qcom,sm6150-mdss", .data = &sm6150_data },
+-	{ .compatible = "qcom,sm6225-mdss", .data = &sm6115_data },
++	{ .compatible = "qcom,sm6225-mdss", .data = &sm6225_data },
+ 	{ .compatible = "qcom,sm6350-mdss", .data = &sm6350_data },
+ 	{ .compatible = "qcom,sm6375-mdss", .data = &sm6350_data },
+ 	{ .compatible = "qcom,sm7150-mdss", .data = &sm7150_data },
